@@ -9,6 +9,9 @@ st.write(
     "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
 )
 
+# Retrieve the OpenAI API key from the secrets file
+openai_api_key = st.secrets["OPENAI_API_KEY"]
+
 # Ask user for their OpenAI API key via `st.text_input`.
 # Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
 # via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
