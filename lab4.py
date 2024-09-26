@@ -1,273 +1,193 @@
-import streamlit as st
-import requests
-from bs4 import BeautifulSoup
-from openai import OpenAI
-#from langchain_ollama import OllamaLLM
-
-__import__('pysqlite3')
 import sys
+import streamlit as st
+from openai import OpenAI
+from PyPDF2 import PdfReader
+import os
+
+# Workaround for sqlite3 issue in Streamlit Cloud
+__import__('pysqlite3')
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 import chromadb
-from chromadb.config import Settings
 
-# Title of the Streamlit app
-st.title("LAB 4 -- Chromadb")
+# Function to ensure the OpenAI client is initialized
+def ensure_openai_client():
+    if 'openai_client' not in st.session_state:
+        # Get the API key from Streamlit secrets
+        api_key = st.secrets["OPEN_AI_KEY"]
+        # Initialize the OpenAI client and store it in session state
+        st.session_state.openai_client = OpenAI(api_key=api_key)
 
-# Fetch the API keys from streamlit secrets
-openai_api_key = st.secrets["OPEN_AI_KEY"]
+# Function to create the ChromaDB collection
+def create_lab4_collection():
+    if 'Lab4_vectorDB' not in st.session_state:
+        # Set up the ChromaDB client
+        persist_directory = os.path.join(os.getcwd(), "chroma_db")
+        client = chromadb.PersistentClient(path=persist_directory)
+        collection = client.get_or_create_collection("Lab4Collection")
 
-# Set API keys for OpenAI and Anthropic
-client = OpenAI(api_key=st.secrets["OPEN_AI_KEY"])
+        ensure_openai_client()
 
-# Sidebar elements
-st.sidebar.title("Chat Bot Options")
-
-# Conversation behavior options
-behavior = st.sidebar.radio(
-    "Conversation behavior:",
-    (
-        "Keep last 5 questions",
-        "Summarize after 5 interactions",
-        "Limit by token size (5000 tokens)",
-    ),
-)
-
-# Model options for CHATBOT
-selected_llm_for_chatbot = st.sidebar.selectbox(
-    "Choose the model for Chatbot",
-    (
-        "OpenAI: gpt 4o-mini",
-        "Claude: claude-3-haiku-20240307",
-    
-    ),
-)
-
-if selected_llm_for_chatbot == "OpenAI: O1-mini":
-    model_to_use_for_chatbot = "gpt-4o-mini"
-
-elif selected_llm_for_chatbot == "OpenAI: gpt 4o-mini":
-    model_to_use_for_chatbot = "gpt-4o-mini"
-
-
-# Function to create ChromaDB Collection named “Lab4Collection”
-def create_chromadb_collection():
-    try:
-        # ChromaDB settings
-        client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory="chromadb_data"
-        ))
-
-        # Create a collection named "Lab4Collection"
-        collection = client.create_collection(name="Lab4Collection")
-        st.success("ChromaDB Collection 'Lab4Collection' created successfully.")
-        return collection
-    except Exception as e:
-        st.error(f"Error creating ChromaDB Collection: {e}")
-
-# Create the collection when the user clicks a button
-if st.button('Create ChromaDB Collection'):
-    create_chromadb_collection()
-
-# Function to extract text content from a URL
-def extract_text_from_url(url):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()  # Handle HTTP errors
-        soup = BeautifulSoup(response.content, "html.parser")
-        # Remove script and style elements
-        for script_or_style in soup(["script", "style"]):
-            script_or_style.decompose()
-        return soup.get_text(separator="\n")
-    except requests.RequestException as e:
-        st.error(f"Failed to retrieve URL: {url}. Error: {e}")
-        return ""
-
-# Initialize session state variables
-if "messages" not in st.session_state:
-    st.session_state["messages"] = []
-if "context_text" not in st.session_state:
-    st.session_state["context_text"] = ""
-if "urls" not in st.session_state:
-    st.session_state["urls"] = {"url1": "", "url2": ""}
-
-# Inputs for URLs
-url1 = st.text_input("First URL:", value=st.session_state["urls"]["url1"])
-url2 = st.text_input("Second URL:", value=st.session_state["urls"]["url2"])
-
-# Check if URLs have changed
-if url1 != st.session_state["urls"]["url1"] or url2 != st.session_state["urls"]["url2"]:
-    st.session_state["urls"]["url1"] = url1
-    st.session_state["urls"]["url2"] = url2
-    # Extract text and update context_text
-    text1 = extract_text_from_url(url1) if url1 else ""
-    text2 = extract_text_from_url(url2) if url2 else ""
-    st.session_state["context_text"] = text1 + "\n" + text2
-    # Reset the messages
-    st.session_state["messages"] = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {
-            "role": "system",
-            "content": "Your output should end with 'DO YOU WANT MORE INFO?' case sensitive unless you get a 'no' as an input. In which case, you should go back to asking 'How can I help you?' Make sure your answers are simple enough for a 10-year-old to understand.",
-        },
-        {"role": "system", "content": f"Here is some background information:\n{st.session_state['context_text']}"},
-        {"role": "assistant", "content": "How can I help you?"},
-    ]
-
-# If no messages, initialize
-if not st.session_state["messages"]:
-    st.session_state["messages"] = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {
-            "role": "system",
-            "content": "Your output should end with 'DO YOU WANT MORE INFO?' case sensitive unless you get a 'no' as an input. In which case, you should go back to asking 'How can I help you?' Make sure your answers are simple enough for a 10-year-old to understand.",
-        },
-        {"role": "system", "content": f"Here is some background information:\n{st.session_state['context_text']}"},
-        {"role": "assistant", "content": "How can I help you?"},
-    ]
-
-# Function to manage conversation memory
-def manage_memory(messages, behavior):
-
-    if behavior == "Keep last 5 questions":
-        # Keep system messages and last 5 pairs
-        system_messages = [msg for msg in messages if msg["role"] == "system"]
-        conversation = [msg for msg in messages if msg["role"] != "system"]
-        return system_messages + conversation[-10:]  # Last 5 pairs (user and assistant)
-
-    elif behavior == "Summarize after 5 interactions":
-        system_messages = [msg for msg in messages if msg["role"] == "system"]
-        conversation = [msg for msg in messages if msg["role"] != "system"]
-
-        if len(conversation) > 10:  # More than 5 pairs
-            # Summarize the conversation
-            document = "\n".join(
-                [msg["content"] for msg in conversation if msg["role"] == "user"]
-            )
-            instruction = "Summarize this conversation."
-            summary = generate_summary(
-                document, instruction, model_to_use_for_chatbot
-            )
-            st.write("### Conversation Summary")
-            st.write(summary)
-            # Reset conversation keeping the system messages and summary
-            return system_messages + [{"role": "assistant", "content": summary}]
-        
-        else:
-            return messages
-        
-    elif behavior == "Limit by token size (5000 tokens)":
-        system_messages = [msg for msg in messages if msg["role"] == "system"]
-        conversation = [msg for msg in messages if msg["role"] != "system"]
-        token_count = sum([len(msg["content"]) for msg in conversation])  # Rough estimation
-        while token_count > 5000 and conversation:
-            conversation.pop(0)  # Remove oldest messages until under the token limit
-            token_count = sum([len(msg["content"]) for msg in conversation])
-        return system_messages + conversation
-    
-    else:
-        return messages
-
-# Function to generate summary (needed for 'Summarize after 5 interactions')
-def generate_summary(text, instruction, model_to_use):
-    if model_to_use in ["gpt-4o-mini", "gpt-4o-mini"]:
-        return summarize_with_openai(text, instruction, model_to_use)
-
-    elif model_to_use.startswith("claude"):
-        return summarize_with_claude(text, instruction, model_to_use)
-
-    else:
-        st.error("Model not supported.")
-        return None
-
-def summarize_with_openai(text, instruction, model):
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant that summarizes conversations."},
-        {"role": "user", "content": f"{instruction}\n\n{text}"},
-    ]
-    response = client.chat.completions.create(
-        model=model, messages=messages, max_tokens=500
-    )
-    summary = response.choices[0].message.content
-    return summary # commenting this because I am getting the summary twice
-
-
-def summarize_with_claude(text, instruction, model):
-    client = anthropic.Client(api_key=claude_api_key)
-    prompt = f"{anthropic.HUMAN_PROMPT} {instruction}\n\n{text} {anthropic.AI_PROMPT}"
-    response = client.completion(
-        prompt=prompt,
-        stop_sequences=[anthropic.HUMAN_PROMPT],
-        model=model,
-        max_tokens_to_sample=500,
-    )
-    return response["completion"]
-
-# Manage conversation memory
-st.session_state["messages"] = manage_memory(st.session_state["messages"], behavior)
-
-# Display chat history
-for msg in st.session_state["messages"]:
-    if msg["role"] != "system":  # Skip the system messages
-        chat_msg = st.chat_message(msg["role"])
-        chat_msg.write(msg["content"])
-
-# Capturing the user input for the chatbot
-if prompt := st.chat_input("Ask the chatbot a question or interact:"):
-    # Append the user's message to session state
-    st.session_state["messages"].append({"role": "user", "content": prompt})
-
-    # Display user's input in the chat
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Function to get chatbot response
-    def get_chatbot_response(messages, model_to_use):
-        if model_to_use in ["gpt-4o-mini", "gpt-4o-mini"]:
-            return chatbot_response_openai(messages, model_to_use)
-        elif model_to_use in ["Claude: claude-3-haiku-20240307"] :
-            return chatbot_response_claude(messages, model_to_use)
-        else:
-            st.error("Model not supported.")
+        # Define the directory containing the PDF files
+        pdf_dir = os.path.join(os.getcwd(), "Lab4_Data_Files")
+        if not os.path.exists(pdf_dir):
+            st.error(f"Directory not found: {pdf_dir}")
             return None
 
-    def chatbot_response_openai(messages, model):
-        response = client.chat.completions.create(
-            model=model, messages=messages
+        # Process each PDF file in the directory
+        for filename in os.listdir(pdf_dir):
+            if filename.endswith(".pdf"):
+                filepath = os.path.join(pdf_dir, filename)
+                try:
+                    # Extract text from the PDF
+                    with open(filepath, "rb") as file:
+                        pdf_reader = PdfReader(file)
+                        text = ''.join([page.extract_text() or '' for page in pdf_reader.pages])
+
+                    # Generate embeddings for the extracted text
+                    response = st.session_state.openai_client.embeddings.create(
+                        input=text, model="text-embedding-3-small"
+                    )
+                    embedding = response.data[0].embedding
+
+                    # Add the document to ChromaDB
+                    collection.add(
+                        documents=[text],
+                        metadatas=[{"filename": filename}],
+                        ids=[filename],
+                        embeddings=[embedding]
+                    )
+                except Exception as e:
+                    st.error(f"Error processing {filename}: {str(e)}")
+
+        # Store the collection in session state
+        st.session_state.Lab4_vectorDB = collection
+
+    return st.session_state.Lab4_vectorDB
+
+# Function to query the vector database
+def query_vector_db(collection, query):
+    ensure_openai_client()
+    try:
+        # Generate embedding for the query
+        response = st.session_state.openai_client.embeddings.create(
+            input=query, model="text-embedding-3-small"
         )
-        assistant_message = response.choices[0].message.content
-        return assistant_message
+        query_embedding = response.data[0].embedding
 
-
-    def chatbot_response_claude(messages, model):
-        client = anthropic.Client(api_key=claude_api_key)
-        prompt = ""
-        for message in messages:
-            if message["role"] == "system":
-                prompt += f"{anthropic.HUMAN_PROMPT} {message['content']} {anthropic.AI_PROMPT}"
-            elif message["role"] == "user":
-                prompt += f"{anthropic.HUMAN_PROMPT} {message['content']} {anthropic.AI_PROMPT}"
-            elif message["role"] == "assistant":
-                prompt += f"{message['content']}"
-        response = client.completion(
-            prompt=prompt,
-            stop_sequences=[anthropic.HUMAN_PROMPT],
-            model=model,
-            max_tokens_to_sample=500,
+        # Query the ChromaDB collection
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=3
         )
-        return response["completion"]
+        return results['documents'][0], [result['filename'] for result in results['metadatas'][0]]
+    except Exception as e:
+        st.error(f"Error querying the database: {str(e)}")
+        return [], []
 
-    # Get assistant's response
-    assistant_message = get_chatbot_response(
-        st.session_state["messages"], model_to_use_for_chatbot
-    )
+# Function to get chatbot response using OpenAI's GPT model
+def get_chatbot_response(query, context):
+    ensure_openai_client()
+    # Construct the prompt for the GPT model
+    prompt = f"""You are an AI assistant with knowledge from specific documents. Use the following context to answer the user's question. If the information is not in the context, say you don't know based on the available information.
 
-    # Append the assistant's response to session state
-    st.session_state["messages"].append(
-        {"role": "assistant", "content": assistant_message}
-    )
+Context:
+{context}
 
-    # Display assistant's response
-    with st.chat_message("assistant"):
-        st.markdown(assistant_message)
+User Question: {query}
+
+Answer:"""
+
+    try:
+        # Generate streaming response using OpenAI's chat completion
+        response_stream = st.session_state.openai_client.chat.completions.create(
+            model="gpt-4o",  # Using the latest GPT-4 model
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            stream=True  # Enable streaming
+        )
+        return response_stream
+    except Exception as e:
+        st.error(f"Error getting chatbot response: {str(e)}")
+        return None
+
+# Initialize session state for chat history, system readiness, and collection
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+if 'system_ready' not in st.session_state:
+    st.session_state.system_ready = False
+if 'collection' not in st.session_state:
+    st.session_state.collection = None
+
+# Page content
+st.title("Lab 4 - Document Chatbot")
+
+# Check if the system is ready, if not, prepare it
+if not st.session_state.system_ready:
+    # Show a spinner while processing documents
+    with st.spinner("Processing documents and preparing the system..."):
+        st.session_state.collection = create_lab4_collection()
+        if st.session_state.collection:
+            # Set the system as ready and show a success message
+            st.session_state.system_ready = True
+            st.success("AI ChatBot is Ready!!!")
+        else:
+            st.error("Failed to create or load the document collection. Please check the file path and try again.")
+
+# Only show the chat interface if the system is ready
+if st.session_state.system_ready and st.session_state.collection:
+    st.subheader("Chat with the AI Assistant")
+
+    # Display chat history
+    for message in st.session_state.chat_history:
+        if isinstance(message, dict):
+            # New format (dictionary with 'role' and 'content' keys)
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        elif isinstance(message, tuple):
+            # Old format (tuple with role and content)
+            role, content = message
+            # Convert 'You' to 'user', and assume any other role is 'assistant'
+            with st.chat_message("user" if role == "You" else "assistant"):
+                st.markdown(content)
+
+    # User input
+    user_input = st.chat_input("Ask a question about the documents:")
+
+    if user_input:
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        # Query the vector database
+        relevant_texts, relevant_docs = query_vector_db(st.session_state.collection, user_input)
+        context = "\n".join(relevant_texts)
+
+        # Get streaming chatbot response
+        response_stream = get_chatbot_response(user_input, context)
+
+        # Display AI response
+        with st.chat_message("assistant"):
+            response_placeholder = st.empty()
+            full_response = ""
+            for chunk in response_stream:
+                if chunk.choices[0].delta.content is not None:
+                    full_response += chunk.choices[0].delta.content
+                    response_placeholder.markdown(full_response + "▌")
+            response_placeholder.markdown(full_response)
+
+        # Add to chat history (new format)
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+
+        # Display relevant documents
+        with st.expander("Relevant documents used"):
+            for doc in relevant_docs:
+                st.write(f"- {doc}")
+
+elif not st.session_state.system_ready:
+    st.info("The system is still preparing. Please wait...")
+else:
+    st.error("Failed to create or load the document collection. Please check the file path and try again.")
